@@ -1,0 +1,64 @@
+# Place this file at:  .github/workflows/daily.yml
+name: Daily MLB hit gaps
+
+on:
+  schedule:
+    - cron: "0 12 * * *"   # 12:00 UTC daily (~8am ET in summer). Runs after the prior night's games are final.
+  workflow_dispatch: {}     # lets you trigger a run manually from the Actions tab
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Best-effort speedup: persist pybaseball's per-day cache between runs so
+      # only newly played days get downloaded. If the path differs on the runner
+      # it simply has no effect — the job still works, just slower.
+      - name: Cache Statcast downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pybaseball
+            ~/.pybaseball
+          key: pybaseball-${{ github.run_id }}
+          restore-keys: |
+            pybaseball-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build site
+        run: |
+          python mlb_hit_gaps.py
+          mkdir -p _site
+          cp index.html _site/index.html
+          cp mlb_hit_gaps.csv _site/mlb_hit_gaps.csv
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
