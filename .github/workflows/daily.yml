@@ -1,10 +1,10 @@
 # Place this file at:  .github/workflows/daily.yml
-name: Daily MLB hit gaps
+name: Daily MLB baseline
 
 on:
   schedule:
-    - cron: "0 12 * * *"   # 12:00 UTC daily (~8am ET in summer). Runs after the prior night's games are final.
-  workflow_dispatch: {}     # lets you trigger a run manually from the Actions tab
+    - cron: "0 12 * * *"   # 12:00 UTC daily (~8am ET). Rebuilds the season baseline.
+  workflow_dispatch: {}     # manual trigger from the Actions tab
 
 permissions:
   contents: read
@@ -25,28 +25,25 @@ jobs:
         with:
           python-version: "3.12"
 
-      # Best-effort speedup: persist pybaseball's per-day cache between runs so
-      # only newly played days get downloaded. If the path differs on the runner
-      # it simply has no effect — the job still works, just slower.
-      - name: Cache Statcast downloads
+      # Persist finished-game play-by-play between runs so later runs only
+      # fetch newly completed games (keeps the daily job fast).
+      - name: Cache play-by-play
         uses: actions/cache@v4
         with:
-          path: |
-            ~/.cache/pybaseball
-            ~/.pybaseball
-          key: pybaseball-${{ github.run_id }}
+          path: pbp_cache
+          key: pbp-${{ github.run_id }}
           restore-keys: |
-            pybaseball-
+            pbp-
 
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Build site
+      - name: Build baseline + assemble site
         run: |
-          python mlb_hit_gaps.py
+          python build_baseline.py
           mkdir -p _site
           cp index.html _site/index.html
-          cp mlb_hit_gaps.csv _site/mlb_hit_gaps.csv
+          cp baseline.json _site/baseline.json
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
