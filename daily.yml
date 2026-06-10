@@ -1,0 +1,61 @@
+# Place this file at:  .github/workflows/daily.yml
+name: Daily MLB baseline
+
+on:
+  schedule:
+    - cron: "0 12 * * *"   # 12:00 UTC daily (~8am ET). Rebuilds the season baseline.
+  workflow_dispatch: {}     # manual trigger from the Actions tab
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      # Persist finished-game play-by-play between runs so later runs only
+      # fetch newly completed games (keeps the daily job fast).
+      - name: Cache play-by-play
+        uses: actions/cache@v4
+        with:
+          path: pbp_cache
+          key: pbp-${{ github.run_id }}
+          restore-keys: |
+            pbp-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build baseline + assemble site
+        run: |
+          python build_baseline.py
+          mkdir -p _site
+          cp index.html _site/index.html
+          cp baseline.json _site/baseline.json
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
