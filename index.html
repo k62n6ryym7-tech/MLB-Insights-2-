@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MLB Hit Gaps — Live</title>
+<style>
+:root{
+  --paper:#f6f4ee; --ink:#16110d; --line:#d8d2c4; --muted:#6b6256;
+  --board:#11201a; --board-ink:#eef1ec; --chalk:#b78a2e; --cold:#2f6fb0;
+  --flag:#b51e1e; --live:#1e8e3e;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);
+  font:15px/1.4 ui-sans-serif,system-ui,"Helvetica Neue",sans-serif}
+.wrap{max-width:1000px;margin:0 auto;padding:28px 18px 60px}
+header{border-bottom:3px solid var(--ink);padding-bottom:14px;margin-bottom:8px}
+h1{margin:0;font:700 30px/1 "Arial Narrow","Helvetica Neue",sans-serif;
+  letter-spacing:.14em;text-transform:uppercase}
+.status{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted);margin-top:8px}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--muted)}
+.dot.on{background:var(--live);animation:pulse 1.8s infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(30,142,62,.5)}70%{box-shadow:0 0 0 7px rgba(30,142,62,0)}100%{box-shadow:0 0 0 0 rgba(30,142,62,0)}}
+.legend{font-size:12.5px;color:var(--muted);margin:14px 0 14px;max-width:760px}
+.legend b{color:var(--ink)}
+.banner{background:#fff3cd;border:1px solid #e0c66b;border-radius:6px;padding:12px 14px;
+  margin:14px 0;font-size:13.5px;color:#5c4a00}
+.banner code{background:#00000010;padding:1px 5px;border-radius:3px}
+.controls{display:flex;align-items:center;gap:10px;margin:0 0 14px}
+.controls label{font:600 12px/1 ui-sans-serif,sans-serif;letter-spacing:.05em;
+  text-transform:uppercase;color:var(--muted)}
+.controls select{font:14px/1 ui-sans-serif,sans-serif;padding:6px 10px;
+  border:1.5px solid var(--ink);border-radius:5px;background:var(--paper);color:var(--ink)}
+.controls .count{font:12px/1 ui-monospace,monospace;color:var(--muted);margin-left:auto}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+thead th{position:sticky;top:0;background:var(--board);color:var(--board-ink);
+  text-align:right;padding:10px 12px;font:600 12px/1 ui-sans-serif,sans-serif;
+  letter-spacing:.05em;cursor:pointer;user-select:none;white-space:nowrap}
+thead th:first-child,thead th.l{text-align:left}
+thead th .arr{color:var(--chalk);font-size:10px;margin-left:4px}
+tbody td{padding:9px 12px;text-align:right;border-bottom:1px solid var(--line);
+  font-family:ui-monospace,"SFMono-Regular","Cascadia Code",monospace;font-size:13.5px}
+tbody td.l{text-align:left;font-family:inherit;font-weight:600}
+tbody tr:hover{background:#efeadd}
+tbody tr.overdue td{background:#f7e7e2}
+tbody tr.overdue:hover td{background:#f2ddd5}
+tbody tr.overdue td:first-child{box-shadow:inset 3px 0 0 var(--flag)}
+.flag{display:inline-block;margin-left:8px;font:600 9.5px/1 ui-sans-serif,sans-serif;
+  letter-spacing:.08em;color:var(--flag);border:1px solid var(--flag);border-radius:3px;padding:2px 5px;vertical-align:middle}
+.rank{color:var(--muted);font-family:ui-monospace,monospace;font-size:12px;padding-right:6px}
+footer{margin-top:22px;font-size:12px;color:var(--muted)}
+@media(max-width:560px){h1{font-size:23px}}
+</style></head>
+<body><div class="wrap">
+<header>
+  <h1>MLB Hit Gaps</h1>
+  <div class="status"><span class="dot" id="dot"></span><span id="statusText">Loading…</span></div>
+</header>
+
+<div id="banner"></div>
+
+<p class="legend">
+  <b>AVG</b> batting average &middot;
+  <b>Avg Gap</b> typical hitless plate-appearance streak between hits &middot;
+  <b>Since Last Hit</b> current drought (deeper blue = colder) &middot;
+  <span class="flag">OVERDUE</span> drought now exceeds the player's usual gap. Updates live during games.
+</p>
+
+<div class="controls">
+  <label for="teamFilter">Team</label>
+  <select id="teamFilter"><option value="ALL">All teams</option></select>
+  <span class="count" id="count"></span>
+</div>
+
+<table>
+  <thead><tr id="headRow"></tr></thead>
+  <tbody id="tbody"></tbody>
+</table>
+
+<footer>Season baseline rebuilt daily; today's games update live from the MLB Stats API.</footer>
+</div>
+
+<script>
+// ===================== CONFIG — set this once =====================
+const RELAY = "https://YOUR-WORKER.workers.dev";   // <-- your Cloudflare Worker URL
+const MIN_PA = 50;
+const REFRESH_MS = 25000;
+// ==================================================================
+
+const HIT = new Set(["single","double","triple","home_run"]);
+const NONAB = new Set(["walk","intent_walk","hit_by_pitch","sac_fly","sac_bunt",
+  "sac_fly_double_play","sac_bunt_double_play","catcher_interf"]);
+
+const COLS = [
+  {key:"player", label:"Player", type:"txt"},
+  {key:"team",   label:"Team",   type:"txt"},
+  {key:"avg",    label:"AVG",    type:"num"},
+  {key:"pa",     label:"PA",     type:"num"},
+  {key:"h",      label:"H",      type:"num"},
+  {key:"avgGap", label:"Avg Gap",type:"num"},
+  {key:"since",  label:"Since Last Hit", type:"num"},
+];
+
+let baseline = null;
+let teamAbbr = {};                 // teamId -> abbrev
+const games = {};                  // gamePk -> {final, away, home, start, pas:{idx:{...}}}
+let liveCount = 0;
+let sortKey = "avg", sortAsc = false;   // default: AVG highest first
+let selectedTeam = "ALL";
+
+const $ = id => document.getElementById(id);
+const relayURL = path => RELAY.replace(/\/$/,"") + path;
+
+function etDate(d=new Date()){
+  const p = new Intl.DateTimeFormat("en-CA",{timeZone:"America/New_York",
+    year:"numeric",month:"2-digit",day:"2-digit"}).formatToParts(d);
+  const g = t => p.find(x=>x.type===t).value;
+  return `${g("year")}-${g("month")}-${g("day")}`;
+}
+
+async function getJSON(url){
+  const r = await fetch(url, {cache:"no-store"});
+  if(!r.ok) throw new Error(r.status+" "+url);
+  return r.json();
+}
+
+function applyPAs(st, pas){
+  for(const p of pas){
+    st.pa++;
+    if(p.is_ab) st.ab++;
+    if(p.is_hit){ if(st.h>=1) st.sum_gaps += st.since; st.h++; st.since=0; }
+    else st.since++;
+  }
+  return st;
+}
+
+function parsePlays(plays, awayAbbr, homeAbbr){
+  const out = {};
+  for(const p of (plays||[])){
+    const res=p.result||{}, ab=p.about||{};
+    if(res.type!=="atBat" || !ab.isComplete) continue;
+    const et=res.eventType; if(!et) continue;
+    const b=(p.matchup||{}).batter||{};
+    if(b.id==null) continue;
+    out[ab.atBatIndex] = {
+      bid:b.id, name:b.fullName,
+      is_hit:HIT.has(et), is_ab:!NONAB.has(et),
+      team: ab.halfInning==="top" ? awayAbbr : homeAbbr
+    };
+  }
+  return out;
+}
+
+function computeRows(){
+  const rec = {};
+  for(const [id,b] of Object.entries(baseline.players||{})){
+    rec[id] = {name:b.name, team:b.team, pa:b.pa, ab:b.ab, h:b.h, sum_gaps:b.sum_gaps, since:b.since};
+  }
+  const live = {};   // id -> array of {sort, pa}
+  for(const [pk,g] of Object.entries(games)){
+    for(const [idx,pa] of Object.entries(g.pas)){
+      (live[pa.bid] = live[pa.bid] || []).push({sort:[g.start||"",+pk,+idx], pa});
+    }
+  }
+  for(const [id,arr] of Object.entries(live)){
+    arr.sort((a,b)=> a.sort[0]<b.sort[0]?-1 : a.sort[0]>b.sort[0]?1 : (a.sort[1]-b.sort[1])||(a.sort[2]-b.sort[2]));
+    const last = arr[arr.length-1].pa;
+    if(!rec[id]) rec[id] = {name:last.name, team:last.team, pa:0,ab:0,h:0,sum_gaps:0,since:0};
+    applyPAs(rec[id], arr.map(x=>x.pa));
+    rec[id].name = last.name; rec[id].team = last.team;
+  }
+  const rows = [];
+  for(const r of Object.values(rec)){
+    if(r.pa < MIN_PA) continue;
+    const avg = r.ab>0 ? r.h/r.ab : null;
+    const avgGap = r.h>=2 ? r.sum_gaps/(r.h-1) : null;
+    rows.push({player:r.name||"", team:r.team||"", avg, pa:r.pa, h:r.h,
+               avgGap, since:r.since, overdue: avgGap!=null && r.since>avgGap});
+  }
+  return rows;
+}
+
+function esc(s){ return (""+s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+function render(){
+  const rows = computeRows();
+  const teams = [...new Set(rows.map(r=>r.team).filter(Boolean))].sort();
+  const sel = $("teamFilter");
+  const keep = sel.value;
+  sel.innerHTML = '<option value="ALL">All teams</option>' +
+    teams.map(t=>`<option value="${t}">${t}</option>`).join("");
+  sel.value = (keep==="ALL"||teams.includes(keep)) ? keep : "ALL";
+  selectedTeam = sel.value;
+
+  const view = selectedTeam==="ALL" ? rows : rows.filter(r=>r.team===selectedTeam);
+  view.sort((a,b)=>{
+    let x=a[sortKey], y=b[sortKey];
+    if(x==null && y==null) return 0; if(x==null) return 1; if(y==null) return -1;
+    if(typeof x==="number") return sortAsc ? x-y : y-x;
+    return sortAsc ? (""+x).localeCompare(y) : (""+y).localeCompare(x);
+  });
+
+  const maxCold = Math.max(1, ...view.map(r=>r.since));
+  const fmt = {
+    player:r=>`<td class="l">${esc(r.player)}${r.overdue?'<span class="flag">OVERDUE</span>':''}</td>`,
+    team:  r=>`<td class="l">${esc(r.team)}</td>`,
+    avg:   r=>`<td>${r.avg==null?"—":r.avg.toFixed(3).replace(/^0/,"")}</td>`,
+    pa:    r=>`<td>${r.pa}</td>`,
+    h:     r=>`<td>${r.h}</td>`,
+    avgGap:r=>`<td>${r.avgGap==null?"—":r.avgGap.toFixed(2)}</td>`,
+    since: r=>{ const a=Math.min(r.since/maxCold,1)*0.78;
+               const st=`background:rgba(47,111,176,${a.toFixed(2)});`+(a>0.45?"color:#fff;":"");
+               return `<td style="${st}">${r.since}</td>`; }
+  };
+  $("tbody").innerHTML = view.map((r,i)=>
+    `<tr class="${r.overdue?"overdue":""}"><td class="rank">${i+1}</td>`+
+    COLS.map(c=>fmt[c.key](r)).join("")+`</tr>`).join("");
+  $("count").textContent = selectedTeam==="ALL" ? `${view.length} batters` : `${view.length} of ${rows.length}`;
+}
+
+function buildHead(){
+  $("headRow").innerHTML = '<th class="rank"></th>' +
+    COLS.map(c=>`<th class="${c.type==="txt"?"l":""}" data-key="${c.key}">${c.label}<span class="arr"></span></th>`).join("");
+  $("headRow").querySelectorAll("th[data-key]").forEach(th=>{
+    th.addEventListener("click",()=>{
+      const k=th.dataset.key, isTxt=COLS.find(c=>c.key===k).type==="txt";
+      if(sortKey===k) sortAsc=!sortAsc; else { sortKey=k; sortAsc=isTxt; }
+      $("headRow").querySelectorAll(".arr").forEach(a=>a.textContent="");
+      th.querySelector(".arr").textContent = sortAsc?"\u25B2":"\u25BC";
+      render();
+    });
+  });
+  $("teamFilter").addEventListener("change",e=>{ selectedTeam=e.target.value; render(); });
+}
+
+function setStatus(){
+  const live = liveCount>0;
+  $("dot").className = "dot"+(live?" on":"");
+  const t = new Date().toLocaleTimeString();
+  $("statusText").textContent = live
+    ? `Live — ${liveCount} game${liveCount>1?"s":""} in progress · updated ${t}`
+    : `No games in progress · season totals · checked ${t}`;
+}
+
+async function refreshLive(){
+  try{
+    const today = etDate();
+    const sched = await getJSON(relayURL(`/api/v1/schedule?sportId=1&startDate=${baseline.cutoffDate}&endDate=${today}`));
+    const todays = [];
+    for(const d of (sched.dates||[])) for(const g of (d.games||[])) todays.push(g);
+    liveCount = todays.filter(g=>g.status && g.status.abstractGameState==="Live").length;
+
+    await Promise.all(todays.map(async g=>{
+      const pk=g.gamePk, state=g.status && g.status.abstractGameState;
+      if(games[pk] && games[pk].final) return;          // finished: already captured
+      if(state==="Preview") return;                     // not started
+      const pbp = await getJSON(relayURL(`/api/v1/game/${pk}/playByPlay`));
+      const away = teamAbbr[g.teams && g.teams.away.team.id] || "";
+      const home = teamAbbr[g.teams && g.teams.home.team.id] || "";
+      games[pk] = {final: state==="Final", away, home, start:g.gameDate||"",
+                   pas: parsePlays(pbp.allPlays, away, home)};
+    }));
+    render(); setStatus();
+  }catch(e){
+    $("statusText").textContent = "Live update failed (check the relay URL). Showing latest data.";
+    console.error(e);
+  }
+}
+
+async function init(){
+  if(RELAY.includes("YOUR-WORKER")){
+    $("banner").innerHTML = 'Set <code>RELAY</code> at the top of this file to your Cloudflare Worker URL, then redeploy. Until then the page shows the daily season baseline only.';
+  }
+  baseline = await getJSON("baseline.json");
+  buildHead();
+  const avgArr = $("headRow").querySelector('th[data-key="avg"] .arr');
+  if(avgArr) avgArr.textContent = "\u25BC";
+  render();
+  setStatus();
+  if(RELAY.includes("YOUR-WORKER")) return;            // no relay yet → baseline only
+  try{
+    const t = await getJSON(relayURL("/api/v1/teams?sportId=1"));
+    teamAbbr = Object.fromEntries((t.teams||[]).map(x=>[x.id, x.abbreviation||""]));
+  }catch(e){ console.error("teams fetch failed", e); }
+  await refreshLive();
+  setInterval(refreshLive, REFRESH_MS);
+}
+
+init();
+</script>
+</body></html>
